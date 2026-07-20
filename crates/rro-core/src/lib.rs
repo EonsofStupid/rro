@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod events;
+pub mod fabric;
 pub mod geo;
 pub mod query;
 pub mod semconv;
@@ -22,6 +23,7 @@ mod turn;
 pub mod types;
 
 pub use error::{Result, RroError};
+pub use fabric::FabricMeta;
 pub use query::{Condition, EstateQuery, Filter, FusionMode, HybridWeights, Prefetch};
 pub use traits::{Classifier, Embedder, Recall, Reranker, VectorRecord};
 pub use turn::{emit_stage, emit_turn, TurnId};
