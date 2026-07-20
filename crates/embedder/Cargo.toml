@@ -1,0 +1,36 @@
+[package]
+name = "embedder"
+description = "Reason Ready — perception. Embedder trait impls: deterministic default + DevPULSE (Qwen) plug-point."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Enables the candle-backed DevPULSE (Qwen) embedder. Off by default so the
+# workspace builds with zero model weights.
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
+[dependencies]
+serde_json = { workspace = true }
+rro-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "time", "rt"] }
+serde = { workspace = true }
+candle-core = { version = "0.11.0", optional = true }
+candle-nn = { version = "0.11.0", optional = true }
+candle-transformers = { version = "0.11.0", optional = true }
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "embed"
+harness = false

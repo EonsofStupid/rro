@@ -1,0 +1,26 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Model weights / caches — DevPULSE artifacts live outside the tree
+/models
+/weights
+*.safetensors
+*.gguf
+*.onnx
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Runtime estate + event stream (.rrf/ was committed by accident once —
+# 1.9 MB of RocksDB logs. Both names stay ignored so a stale checkout
+# that still writes .rrf/ cannot repeat it.)
+/.rro/
+/.rrf/
+*.jsonl.tmp
+
+# real benchmark corpora (downloaded, not authored here)
+/eval-data/

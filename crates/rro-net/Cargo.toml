@@ -1,0 +1,18 @@
+[package]
+name = "rro-net"
+description = "Reason Ready — the a2a / node networking surface. Embedded is not isolated."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rro-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "net", "io-util", "time"] }
+tracing = { workspace = true }

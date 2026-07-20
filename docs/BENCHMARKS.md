@@ -1,0 +1,619 @@
+# Reason Ready — Measured Results
+
+> ⚠️ **SUPERSEDED — the accuracy numbers below are SYNTHETIC.**
+> They were produced by the deterministic hash embedder scoring synthetic
+> vectors against synthetic vectors (a hash function grading itself), not by any
+> real model. They say nothing about real retrieval. The first honest numbers —
+> real models, a public benchmark, third-party judgments, with a BM25 baseline
+> calibrated against published BEIR — are in [docs/BENCHMARKS_REAL.md](BENCHMARKS_REAL.md).
+> Latency/throughput figures are likewise pre-real: measured ingest with a real
+> model is ~1000x slower (10 docs/sec, not 10.9k).
+
+
+
+**Every number here came out of a real run of `rro-bench`.** Nothing is
+asserted that a run did not produce. Reproduce with:
+
+```sh
+cargo run --release --bin rro-bench -- --docs 50000 --queries 500 --store mem
+cargo run --release --bin rro-bench -- --docs 50000 --queries 500 --store estate
+```
+
+## Environment (2026-07-15)
+
+Shared cloud container (Linux x86_64), release profile, default engine
+components (deterministic embedder, dim 384). Synthetic corpus: 50,000 docs,
+24–64 tokens each, zipf-skewed vocabulary of ~8k distinct terms; 500 hybrid
+queries, top-10. **Numbers on dedicated hardware will differ — re-run there.**
+External baselines run outside this tree on the same corpus/queries and are
+compared on these emitted numbers.
+
+## Ingest — the full machine (embed → index → persist)
+
+| store | wall time | throughput | errors |
+|---|---|---|---|
+| `mem` (in-memory) | 0.43 s | **115,387 docs/sec** | 0 |
+| `estate` (persistent kvs, durable BM25 + vectors + shapes) | 5.63 s | **8,883 docs/sec** | 0 |
+
+Ingestion runs through the whole tokio machine: bounded intake
+(backpressure), 256-doc batches, 4 concurrent batches, graceful drain, every
+document embedded, BM25-indexed, and (estate) durably written.
+
+## Query — hybrid (dense + BM25, reciprocal rank fusion), top-10
+
+| store | p50 | p95 | p99 |
+|---|---|---|---|
+| `mem` | 82.3 ms | 85.6 ms | 95.1 ms |
+| `estate` | 155.4 ms | 168.4 ms | 180.6 ms |
+
+Sequential, single-client latency over 50k docs with **exact** (full-scan)
+dense search. The scan is the known cost: ANN indexing (roadmap Phase 4)
+replaces the O(N) scan; the trait boundary means nothing else changes.
+
+## The rigor loop, demonstrated
+
+The first estate run measured **762 docs/sec**. The harness exposed the flaw:
+postings stored as one JSON blob per term were re-read and re-written on every
+batch — O(N²) on hot terms. Re-authored to the LSM-native layout (one row per
+`(term, doc)`; blind puts, prefix-scan reads):
+
+| | before | after | change |
+|---|---|---|---|
+| estate ingest | 762 docs/sec | **8,883 docs/sec** | **11.7×** |
+
+A second finding from the same runs: the in-memory store cloned every
+record's payload before truncating to top-k; scoring first and cloning only
+winners cut mem query p50 from 116 ms to 82 ms (−29%).
+
+Measure → find → re-author → re-measure. That is how every performance claim
+in this repository gets made.
+
+## Bake-off vs a popular RAG store (2026-07-15, planted-v1 protocol)
+
+**Identical inputs for every row**: the same 50,500 documents and the same
+precomputed 384-d vectors (exported via `rro-bench --export`), same shared
+container, release builds, same run window. Baseline: **ChromaDB 1.5.9**
+(embedded and HTTP-server modes), a widely used RAG vector store. 500 planted
+queries; accuracy@10 = the planted golden doc retrieved.
+
+| system | path | ingest (docs/sec) | accuracy@10 | query p50 |
+|---|---|---|---|---|
+| **rro estate** (hybrid, durable) | local | **6,624** | **1.000** | 188.5 ms |
+| **rro estate, full pipeline** (embed→hybrid→rerank→classify per query) | **a2a layer-2 TCP** | **6,480** | **1.000** | 191.0 ms |
+| rro mem (dense-only fallback) | local | 85,358 | 0.936 | 98.1 ms |
+| ChromaDB (vector ANN) | embedded | 566 | 0.572 | 3.2 ms |
+| ChromaDB (vector ANN) | HTTP | 586 | 0.606 | 4.9 ms |
+
+What the run demonstrated:
+
+- **Ingestion: 11.7× durable-to-durable** (6,624 vs 566), and rro's number
+  *includes* server-side embedding while the baseline received precomputed
+  vectors. Over the network: **11.1×** (a2a 6,480 vs HTTP 586). The
+  in-memory engine is ~150× on this protocol.
+- **Retrieval correctness: 1.000 vs 0.572/0.606.** The hybrid (dense + BM25,
+  reciprocal-rank fused) retrieved every planted target; pure-vector ANN
+  missed ~40%. rro's own dense-only path (0.936) shows the split: exact
+  scan recovers most of the gap, **hybrid closes it to zero** — the design
+  thesis, measured.
+- **The a2a layer-2 wire is ~free**: full pipeline remotely at 191 ms vs
+  188.5 ms locally (+3 ms), identical accuracy — the "treat remote nodes as
+  local" property, demonstrated over TCP.
+- **Query latency is the honest loss**: the baseline's ANN answers in 3–5 ms;
+  rro's exact O(N) scan takes ~190 ms at 50k docs — while also running
+  rerank + readiness per query. This is precisely P2 (ANN) — the gap is
+  quantified, not hidden.
+
+Methodology caveats, stated plainly: hash-based embeddings are adversarial
+for HNSW graphs (near-orthogonal vectors), which depresses the baseline's ANN
+recall relative to semantic embeddings; the historical "130×" figure was not
+produced by this protocol on this container — today's measured multiples are
+**11–15× durable, ~150× in-memory**, and the harness (not memory) is now the
+arbiter of every future claim.
+
+## P2: the ANN index lands (2026-07-15)
+
+Clean-authored layered small-world graph (`recall::AnnIndex`), integrated
+into the estate on the two-phase pattern (durable `vecs` CF is the source of
+truth; graph applied post-commit with read-your-writes; rebuilt from durable
+vectors on open). Unit gate: recall@10 ≥ 0.95 vs exact (property test).
+End-to-end, planted-v1, release, this container:
+
+| scale | metric | exact scan (before) | ANN (after) | change |
+|---|---|---|---|---|
+| 50k | query p50 (hybrid) | 188.5 ms | **1.40 ms** | **135×** |
+| 50k | accuracy@10 | 1.000 | **1.000** | held |
+| 100k | query p50 (hybrid) | ~380 ms (extrapolated O(N)) | **2.09 ms** | ~180× |
+| 100k | accuracy@10 | — | **1.000** | 500/500 goldens |
+| 100k | throughput | ~3 qps | **478 qps** | sequential, full hybrid |
+
+The engine now answers **faster than the popular baseline's pure-vector ANN
+(3.2–4.9 ms) while also running BM25 + reciprocal-rank fusion** — and keeps
+exact-retrieval accuracy the baseline could not reach (1.000 vs 0.572–0.606).
+
+**The ingest cost, then the fix (same day):** synchronous graph build first
+dropped durable ingest 8,883 → 488 docs/sec. Moving graph apply
+**out-of-band** (applier thread + pending overlay for read-your-writes +
+`quiesce`, the recovered compaction pattern) plus unrolled dot kernels
+restored and then beat it:
+
+| | sync build | **out-of-band** |
+|---|---|---|
+| durable ingest | 488 docs/sec | **10,800–10,953 docs/sec** |
+| query p50 (post-quiesce) | 1.40 / 2.09 ms | **1.06 / 1.88 ms** (50k/100k) |
+| accuracy@10 | 1.000 | **1.000 @ 100k**; 0.998 @ 50k¹ |
+| index catch-up (reported separately) | — | 31 s @ 50k / 71 s @ 100k |
+
+¹ One golden in 500 lost to the fusion cutoff (a doc ranked in *both* lists
+can out-fuse a lexical-only rank-1 at the top-k boundary) — a scoring-depth
+tuning question, recorded rather than hidden.
+
+Searches during catch-up stay correct via the pending overlay (exact scores
+over unapplied vectors, removals masked — property- and integration-tested);
+"durably ingested" and "fully indexed" are two moments and both get printed.
+
+## P3: the map resolves the route (2026-07-15)
+
+RELATE-style relations + BFS traversal + `scoped_search` (exact hybrid
+inside a routed neighborhood). The gate corpus is *deliberately ambiguous*:
+every query's golden doc has a decoy carrying the same anchor term, near-
+identical text — but only the golden is RELATEd to the query's project.
+
+| | accuracy@1 (40 ambiguous queries, 1.5k noise floor) |
+|---|---|
+| flat hybrid (no map) | **0.025** |
+| **routed (map → treasure)** | **1.000** |
+
+Content alone cannot tell twins apart; relationships can. This is the
+fusion law measured: the map resolves the route, the treasure answers
+inside it. Reproduce: `cargo test -p connxism --test routing -- --nocapture`.
+
+## Baselines & the regression gate
+
+Recorded container baselines live in `baselines/` (config + numbers, JSON).
+`rro-bench --baseline <path>` re-runs the same configuration and exits
+non-zero on regression beyond tolerance — see
+[OBSERVABILITY](OBSERVABILITY.md). Runs stream JSONL events (`--events`)
+queryable directly by DuckDB.
+
+## Sprint 9: filters go index-first, vectors go 4× smaller (2026-07-16)
+
+**Payload secondary indexes** (`pidx` CF, one row per (field, typed value,
+doc), order-preserving numeric encoding so ranges are index scans): when
+every clause of a `Filter` touches an indexed field, the exact matching
+id-set is resolved from sorted scans and scored exactly inside it —
+filter-first, not post-filter.
+
+| 10k docs, `team = "sec" AND priority >= 8` | latency |
+|---|---|
+| full scan (unindexed clause forces it) | 150.2 ms |
+| **index-resolved** | **15.4 ms (9.8×)** |
+
+Both strategies return identical, brute-force-verified counts; the mixed
+test asserts each strategy is actually the one chosen. Reproduce:
+`cargo test -p connxism --test filters -- --nocapture`.
+
+**SQ8 scalar quantization** (`recall::quant`, per-vector affine codes;
+asymmetric + symmetric dots stay closed-form): the graph holds codes,
+searches over-fetch 2×, and hits are **rescored exactly** from the durable
+vector column family — quantization is a memory decision, never a silent
+accuracy decision.
+
+| 5k × 64d (in-graph gate) | full f32 | SQ8 |
+|---|---|---|
+| recall@10 vs exact | 0.95+ (gate) | **0.982** |
+| vector memory | 1,280,000 B | **380,000 B (3.4×)** |
+
+| 2,048-doc quantized estate (end-to-end) | measured |
+|---|---|
+| recall@10 vs full-precision ground truth | **0.976** |
+| returned scores | exact cosine (≤1e-5 from ground truth, asserted) |
+
+Reproduce: `cargo test -p recall quantized_recall_gate -- --nocapture` and
+`cargo test -p connxism --test quantized -- --nocapture`.
+
+## Sprint 10: the query plane goes everywhere (2026-07-16)
+
+The typed query contract (`EstateQuery` + `Filter`) moved into `rro-core` —
+pure data, no storage dependency — so the thin client speaks the **full**
+filter DSL over the a2a wire, and the MCP `rro_query` tool exposes it to
+any MCP host. Text-only queries are embedded server-side: clients stay
+weightless.
+
+New retrieval strategies, all gated in-tree
+(`cargo test -p connxism --test strategies -- --nocapture`):
+
+- **Grouped search** — n groups × m per group, groups ordered by best hit;
+  invariants asserted (distinct keys, membership, ordering).
+- **Recommend** — steer toward positive examples, away from negatives, on a
+  two-cluster corpus: **10/10 of the top-10 land in the positive cluster**,
+  examples never returned; unknown positives are a typed error.
+- **Discover** — context-pair agreement rerank: cluster-A hits in the top-10
+  went **3/10 (neutral) → 7/10 (steered)** — every A member of the fetched
+  pool ranked first (7 were all the pool held; the mechanism reranks the
+  pool it fetches, honestly).
+- **Batch** — one wire round-trip, results identical to one-at-a-time
+  (asserted).
+
+Wire gates (`cargo test -p rro-client`): filter DSL binds over TCP (every
+hit satisfies the clause set), lean payloads arrive lean, recommend works
+remotely, estate-less nodes refuse `query` with a typed error, and the MCP
+binding answers `rro_query` with DSL end-to-end through a spawned server.
+
+## Sprint 11: weighted sparse joins the fusion (2026-07-16)
+
+`SparseVector` (learned-sparse / custom term weights) is now a first-class
+signal: stored as one weighted posting row per (dimension, document) — the
+same blind-put LSM-native layout as the BM25 index — searched by exact
+accumulated dot product, and RRF-fused with the dense and lexical rankings
+in the typed query plane.
+
+Gates (`cargo test -p connxism --test sparse -- --nocapture`):
+- ranking AND scores equal brute-force sparse dots (≤1e-5) — 200 docs, 3 queries;
+- a planted df=1 dimension retrieves exactly its document; overwrite and
+  removal retract the rows (asserted);
+- a dense-invisible document surfaces in hybrid results **only** when the
+  query carries its sparse signal — three-way fusion measured doing its job;
+- sparse-only queries (no text, no dense vector) work standalone.
+
+## Baseline hygiene: environments drift, gates are per-environment (2026-07-16)
+
+Post-Sprint-11 the regression gate flagged estate query p50 (1.06 → 1.42 ms)
+while the *unchanged* in-memory path simultaneously "improved" 3.6× — both
+signatures of a different container instance, not a code change. Measured:
+three identical release runs of the same ANN probe binary on this container
+swing **394–670 µs/query (±65%)** from neighbor noise.
+
+Actions taken, in order: reproduced the flag twice (it was consistent
+within a session), probed the suspect hot loop A/B (no code-attributable
+delta above the noise floor), then **re-recorded both container baselines
+in the current environment** — estate: accuracy\@10 0.998, p50 1.42 ms,
+8,989 docs/sec durable @ 50k; mem: 0.936, 29.15 ms. Gates re-verified
+green against the fresh baselines.
+
+Rule recorded: baselines are per-environment artifacts. Cross-container
+comparisons need the variance probe first
+(`cargo run --release -p recall --example annprobe`); a delta inside the
+measured noise floor is drift, not regression — and accuracy deltas are
+never excused this way (accuracy stayed 1.00/0.998 throughout).
+
+## Sprint 12: multi-vector per point (2026-07-16)
+
+Named vector spaces (each name its own dimensionality, one `nvecs` row per
+(space, doc) — blind puts, exact cosine by sorted prefix scan) and
+late-interaction token vectors (`mvecs`, MaxSim = Σ_q max_d q·d) joined the
+estate and the typed query plane (`using` routes the dense half; `multi`
+rescores a fetch-deep candidate set). Both ride the a2a wire via serde
+defaults — old payloads still parse (gated).
+
+Gates (`cargo test -p connxism --test multivec`):
+- named ranking AND scores equal brute force (≤1e-5); title/body spaces
+  rank independently;
+- per-point named-vector update: dropped name retracts its row, sibling
+  space untouched, remove retracts all, per-name dim guard errors;
+- a dense-mediocre document with one planted token vector ranks first
+  under MaxSim rescore and does NOT under plain dense; rescored score
+  equals brute-force MaxSim.
+
+Honest scope note: named-space search is exact (scan), not ANN — right
+up to mid-size spaces; per-space graphs are the follow-up.
+
+## Sprint 13: push-stream changefeed over a2a (2026-07-16)
+
+`watch` joins `changes`: one long-lived a2a connection, the node drains the
+durable feed from the client's seq cursor and then pushes each new change
+the moment its write commits — event-driven via the estate's feed signal
+(a write-side notify), with **zero polling on either side**. Cancel = drop
+the connection; resume = the same seq cursor the poll verb uses; the token
+gate covers streams. `Client::watch(since, callback)` is the Clyffy-side
+handle; the transport grew a general `Handler::handle_stream` hook, so
+future streamed verbs (query streaming, tailing) ride the same frame path.
+
+Gates (`cargo test -p rro-engine --test watch`): history drained in order,
+live upserts AND a remove arrive as pushed frames on the one connection
+within timeout, seqs strictly increase, reconnect from the returned cursor
+replays exactly the missed change, unauthorized watch refused.
+
+## Sprint 14: text analyzers (2026-07-16)
+
+The lexical index grew a configurable analyzer pipeline — tokenizer
+(word / whitespace / prefix edge-grams) × lowercase × stopwords × a Porter
+stemmer authored from the published 1980 algorithm (zero-dep, 46 canonical
+spec pairs gated). The analyzer is **part of the index's identity**: fixed
+at estate creation, persisted in `EstateInfo`, applied identically to
+postings and queries; existing estates deserialize to the exact legacy
+pipeline they were indexed with.
+
+Gates (`cargo test -p connxism --test analyzer` + rro-core units):
+- stemming estate matches run/runs/running to the same doc; the legacy
+  estate does not stem (both asserted);
+- pure-stopword queries return nothing (stopwords never reach postings);
+- prefix analyzer serves autocomplete ("con" → connectome doc, "rea" →
+  reason doc) straight off BM25;
+- overwrite retracts postings through the same analyzer;
+- reopen with a different config keeps the persisted analyzer (creation
+  wins once, forever).
+
+## Sprint 15: datetime/uuid indexes, highlighter, REBUILD (2026-07-16)
+
+Payload indexes learned time and identity: RFC3339 strings index as
+order-preserving epoch keys (`PIDX_DT` — range scans walk chronology with
+early stop, offsets compared by instant), UUID strings as 16 raw bytes
+(`PIDX_UUID`, 2.25× smaller keys). `Condition::DateRange` rides the DSL
+(index-first when the field is indexed, post-filter otherwise — gated
+equal). `Estate::rebuild_payload_index` is REBUILD INDEX for payloads and
+the migration path for re-typed rows. `Analyzer::highlight` returns
+byte-offset spans of the ORIGINAL text, analyzer-aware — a stemmed "run"
+query highlights the surface form "running"; the prefix analyzer
+highlights by prefix. RFC3339 parsing is zero-dep (days-from-civil,
+offsets, fractional seconds — unit-gated on known instants).
+
+Gates: index id-set equals brute-force truth (bounded + half-open +
+offset-spelled bounds); uuid equality resolves from typed rows; rebuild
+idempotent and erroring on unindexed fields; highlight spans slice the
+original text to the expected surface forms.
+
+## Sprint 16: named collections in one estate (2026-07-16)
+
+Collections joined the estate as first-class scoping: membership is one
+`coll` CF row per (collection, doc) — blind puts, retracted exactly on
+move/remove — auto-registered with exact counts, and
+`EstateQuery.collection` (serde default, rides the a2a wire) folds into
+the scope/prefilter id-universe machinery with exact scoring inside the
+collection. `Estate::drop_collection` fully retracts every member
+(postings, vectors, payload/sparse/named rows, changefeed removes) and
+deregisters the name.
+
+Gates (`cargo test -p connxism --test collections`): two collections plus
+uncollected floaters sharing identical vocabulary never leak into each
+other's results at full depth; collection ∩ explicit scope intersects;
+unknown collection returns empty; a moved doc leaves one and joins the
+other; drop removes exactly its members (estate len, doc lookups, feed
+row count, and search all asserted), leaving siblings and floaters
+untouched.
+
+## Sprint 17: offset, with_vectors, sampling, similarity matrix (2026-07-16)
+
+Four small A3 rows closed, all wire-riding serde defaults:
+`EstateQuery.offset` ranks to `offset+k` depth then pages (gated: each
+page equals the full ranking's slice, on the fused pipeline);
+`with_vectors` hydrates each winner's stored dense vector onto
+`Candidate.vector` (gated equal to the upserted vectors, absent by
+default, old payloads parse); `Estate::sample(n, seed)` draws a
+deterministic seeded reservoir over the doc CF (reproducible, distinct,
+n>corpus → whole corpus); `similarity_matrix(ids)` returns the pairwise
+cosine upper triangle over stored vectors, skipping unknown ids (gated
+against direct cosine, 1e-6).
+
+## Sprint 18: aliases + per-point payload CRUD (2026-07-16)
+
+Aliases: a single-blob alias map (create/list/switch/delete) resolved
+anywhere a collection name is accepted — a repoint is atomic, so the same
+live query flips from one collection to another without touching data
+(gated). Payload CRUD per point: `set_payload` (merge),
+`overwrite_payload`, `delete_payload_keys`, `clear_payload` — each is one
+WriteBatch carrying the rewritten doc, exact payload-index
+retraction/rewrite, the shape-census adjustment, and a changefeed row.
+Gates assert the index-resolved id-sets before/after every op (old rows
+gone, new rows live, siblings untouched), one feed row per op, and that
+mutating a missing doc errors.
+
+## Sprint 19: the 12–18 surface over the wire + MCP (2026-07-16)
+
+Every capability from sprints 12–18 is now remote: new a2a verbs
+(`matrix`, `sample`, `collections`, `drop_collection`, alias
+create/list/delete, the four payload ops) with matching typed `Client`
+methods, and two new MCP tools (`rro_collections`, `rro_payload`).
+Named-space and sparse search needed **no** new verbs — they already ride
+`query` via `using`/`sparse`, now gated over live TCP.
+
+Gate (`cargo test -p rro-engine --test wire_surface`): one end-to-end test
+drives every verb against a live node — matrix pairs equal local (1e-6),
+same-seed sample identical, alias created over the wire redirects a wire
+query then deletes clean, payload ops visible in local reads (and a bad
+target errors across the wire), drop_collection removes exactly its
+members. All verbs sit behind the same token gate as the rest of the
+surface.
+
+## Sprint 20: ops surface — health, /metrics, issues (2026-07-16)
+
+The estate now reports on itself: `Estate::health()` (docs, feed seq,
+live applier backlog via the new `Pending::backlog()`, collections, dims,
+quantization) and `Estate::issues(threshold)` (applier backlog, dim
+unset, feed/doc divergence). Surfaced twice: a `health` a2a verb
+(uptime + snapshot + issues, `Client::health`) and a **zero-dep** HTTP
+listener (`serve_ops`; daemon: `RRO_OPS_ADDR`) answering prometheus-0.0.4
+`/metrics` (gauges incl. per-collection doc counts) and `/healthz`
+`/livez` `/readyz` probes.
+
+Found and fixed by the gate: `health` initially read the estate-info
+snapshot cached at open — `dim` is written by the first upsert, so the
+cached copy was stale (reported null). Health now re-reads it from the
+database.
+
+Gates: health verb equals live counters over TCP; raw-socket HTTP GETs
+parse (every metrics line numeric, probes 200, 404/405 policed); issues
+fires on a planted backlog and is clean after quiesce.
+
+## Sprint 21: geo — the last core index type (2026-07-16)
+
+`{lat, lon}` metadata points are now first-class: `rro-core::geo`
+(haversine great-circle in meters, unit-gated on Paris↔London;
+`Condition::GeoRadius`/`GeoBox` with exact post-filter matches) and
+`PIDX_GEO` typed keys — a Z-order/Morton encoding (26 bits/axis, ~0.3 m
+quantization) authored from the concept, zero-dep. The scan exploits
+Morton's per-axis monotonicity (property-gated, 500 random pairs): one
+`[z(min corner), z(max corner)]` range covers every point of a box;
+Z-jump false positives are culled by re-checking each candidate EXACTLY
+against stored metadata, so radius results are true haversine, never
+quantized. Radius queries pre-filter through a latitude-scaled bounding
+box. Honest v1 limits: boxes must not cross the antimeridian; polygons
+deferred.
+
+Gates: index-resolved id-sets equal brute-force truth on a 15×15 city
+grid across 4 boxes (incl. whole-grid, tiny, disjoint) and 4 radii
+(incl. corner-centered and 10 m); the query plane returns exactly the
+truth set; a moved point retracts from its old radius and is findable
+at its new home.
+
+## Sprint 22: regression pass + feature-latency baseline (2026-07-16)
+
+Eleven feature sprints (11–21) later, both recorded gates pass with zero
+regression beyond the measured noise floor (probe: 428–590 µs across
+identical runs, ±30%): mem 115k docs/sec / p50 29.5 ms / accuracy 0.94;
+estate 8.4k docs/sec durable / p50 1.73 ms / accuracy **1.00** @ 50k.
+
+**Feature-latency baseline** (`cargo run --release -p rro-engine --example
+featbench`; 50k docs, 64-dim, 200 queries per path, one shared container):
+
+| path | p50 | p95 |
+|---|---|---|
+| dense-only top-10 (ANN) | **0.32 ms** | 0.39 ms |
+| hybrid top-10 | 85.7 ms | 89.9 ms |
+| indexed filter (eq, filter-first) | 85.6 ms | 90.9 ms |
+| geo radius 3 km (Z-scan + exact) | 83.2 ms | 129.0 ms |
+| sparse-fused (three-way RRF) | 78.3 ms | 86.2 ms |
+| MaxSim rescored | 78.1 ms | 85.0 ms |
+| collection-scoped (5k members) | 93.2 ms | 100.1 ms |
+| **watch push-frame delivery** (commit → frame on the wire) | **0.28 ms** | 0.37 ms |
+
+Honest reading: this corpus is **adversarial for lexical scoring** — every
+query term appears in all 50k documents, so BM25 walks ~50k postings per
+term per query; that (not the features) is the ~80 ms. Each sprint-11–21
+feature adds only **0–9 ms** over the plain hybrid cost on the same
+workload, and the bake-off's selective-vocabulary hybrid remains 1.73 ms.
+Raw estate write throughput (pre-built vectors, no embedding): ~60k
+docs/sec, ANN catch-up ~9–10 s at 50k.
+
+Recorded follow-up: common-term lexical cost wants top-k postings pruning
+(max-score/WAND-class early exit) — queued as its own measured sprint.
+
+## Sprint 23: lexical max-score pruning + postings fast path (2026-07-16)
+
+Three pieces, all exact:
+- **Blind df stats**: per-term document frequencies in a `tdf` CF
+  maintained through a RocksDB associative merge operator (+1/−1 deltas)
+  — counters without read-modify-write, so the LSM write law holds.
+  Gated: df tracks upsert (repeats count once), overwrite, and remove
+  exactly.
+- **Binary postings** (8-byte tf+len; JSON fallback for pre-existing
+  rows) — no more per-row JSON parse on the hot path.
+- **Max-score top-k** (authored from the Turtle–Flood concept): df point
+  reads give per-term upper bounds before any scan; terms scan in
+  descending bound; once the k-th accumulator exceeds the summed bounds
+  of the unprocessed terms, the remaining (common) terms resolve by
+  point lookups over the candidates instead of full scans. Estates
+  without stats (pre-sprint) keep the full scorer.
+
+**Exactness gate**: pruned top-k ids AND scores equal an in-test
+brute-force BM25 on selective, multi-rare, common-only, mixed, mid-
+frequency, and absent-term workloads over a randomized 400-doc corpus.
+
+**Measured (featbench, 50k docs)**: selective+common queries (df≈100
+group token + common terms) — **11.1 ms p50 vs 91.4 ms** for the
+equivalent all-common query on the same corpus: **8.3×**, exact.
+Honest limit, understood not hand-waved: all-common workloads (every
+term df=n) *cannot* prune — any unseen doc may still enter the top-k,
+so exactness forces the full postings walk; that cost is iterator-bound
+(~150k RocksDB steps), not parse-bound. If it ever matters, the next
+lever is bounded-error term dropping (idf < ε) — approximate, so it
+would be opt-in and labeled.
+
+## Sprint 24: prefetch pipelines + index-first facets (2026-07-16)
+
+`Prefetch { query, limit }` joins the query contract (recursive,
+serde-default — rides the a2a wire and MCP unchanged): each stage gathers
+candidates by its own signal, the union becomes the outer query's id
+universe (∩ explicit scope), and the outer signal rescores exactly —
+dense, sparse, or MaxSim. Depth-capped at three levels (a pipeline, not a
+recursion bomb; gated both ways). Gated: a dense→MaxSim pipeline equals
+its hand-built two-stage equivalent; a sparse+dense union carries
+dense-invisible docs in; old wire payloads parse.
+
+`Estate::facet` is index-first for string/bool fields: rows sort by typed
+value, so counting distinct values is one run-length prefix scan with
+zero doc reads (gated equal to the doc scan on the same estate).
+Honest limit found by the gate: numeric keys hold a canonical f64
+encoding, not the JSON source spelling ("2.0" vs "2") — reconstructing
+would silently change facet keys, so numbers (and datetime/uuid/geo)
+fall back to the exact doc scan. `Estate::distinct` lists facet keys.
+
+## Sprint 25: flush/fsync semantics + compaction + optimizer status (2026-07-16)
+
+Durability got explicit: `Estate::flush()` (every CF's memtable + WAL
+sync — the ack point) with a `flush` a2a verb and `Client::flush`;
+`EstateConfig.fsync_writes` routes every WriteBatch through synced write
+options for power-loss durability. Maintenance got hands: manual
+full-range `compact()` per CF (`compact` verb returns per-CF live SST
+bytes) and `cf_sizes()` surfaced as `HealthReport.cf_bytes`.
+
+Found the hard way, fixed structurally: while wiring `flush`, the verb
+briefly wasn't routed — and an unrouted verb returned `Ok(None)`, i.e.
+NO reply, hanging the request/reply client forever. FlowNode now replies
+`{"error": "unknown verb: …"}` for anything unmatched (gated over live
+TCP), so a typo'd verb can never hang a caller again. Diagnosis chain
+recorded for honesty: the hang reproduced only over the wire; local
+flush/compact were instant; probe output was invisible for two rounds
+because grep block-buffers into a pipe.
+
+Gates: flush + compact answer over live TCP with per-CF sizes; every
+query path exact after a churned (overwrite/remove) estate compacts —
+filters, df counters, hybrid, tombstones; fsync estates accept writes
+and stay exact; kill-9 suite still green.
+
+## Sprint 26: strict mode / resource limits (2026-07-16)
+
+`Quotas` on `EstateConfig` — `max_docs` (net-new counted inside the
+serialized writer, so the cap is race-free and overwrites still pass),
+`max_payload_bytes` (per-doc serialized metadata), `max_top_k`,
+`max_batch` — all rejecting with the new typed `RroError::Quota` at the
+boundary, before any write. Configured limits ride `HealthReport.quotas`;
+the daemon takes `RRO_STRICT=1` for sane strict defaults (64 KiB
+payloads, top-k 1024, batch 4096). The wire `query` verb now replies
+`{"error": …}` on refusals instead of dropping the connection (same
+family of fix as Sprint 25's unknown-verb reply).
+
+Gates: every quota one-under passes / one-over rejects typed; doc cap
+allows overwrites at the cap; health carries the limits over TCP; an
+over-limit wire query gets a clean refusal and the node stays healthy.
+
+## Sprint 27: highlights on candidates + INFO + feed stats (2026-07-16)
+
+`EstateQuery.highlight` → `Candidate.highlights` (byte spans into the
+candidate's text, serde-defaulted — old payloads parse): winners carry
+analyzer-aware match spans, so a stemmed query highlights the inflected
+surface forms it actually matched — gated offset-exact locally AND over
+the wire. `info` a2a verb (`Client::info`): estate identity, analyzer,
+dims, payload indexes, collections, aliases, quotas, health, and the new
+`feed_stats()` (first/next seq + retained rows — the SHOW CHANGES shape).
+
+Scoped honestly: the mem-KV backend row stays 🔨 — the `Db` seam is used
+raw (iterators, merge operators, properties, compaction) across every
+estate module; abstracting it is its own effort, not a rider on this
+sprint.
+
+## Sprint 28: consolidation — a caught regression, a measured trade-off (2026-07-16)
+
+The consolidation gate did its job: estate ingest had slid 8,989 →
+3,914 docs/sec (−56%) across sprints 23–27, with queries and accuracy
+untouched. Diagnosis, in order:
+1. **Netted df deltas**: Sprint 23 emitted one `tdf` merge per (term,
+   doc); hot terms accumulated thousands of merge operands per flush.
+   Netting per WriteBatch (one operand per term per batch, same counts,
+   same atomicity) recovered to 5,734.
+2. **Isolated the remainder**: with df merges disabled entirely, ingest
+   returned to 8,455 (in tolerance) — the rest is intrinsic write
+   amplification: unique-token-heavy corpora pay one extra key write per
+   new term per doc. Netting cannot collapse distinct terms.
+3. **Made the trade-off explicit**: `EstateConfig.lexical_stats`
+   (default ON). Stats buy max-score pruning; turning them off buys
+   ~⅓ ingest back and the scorer falls back to full scans (gated).
+
+Re-recorded steady state (stats on): **5,936 docs/sec durable, p50
+1.44 ms, accuracy@10 0.998 @ 50k**; gate re-verified green (6,628 on the
+verify run). And the netting paid a second dividend: featbench's pruned
+selective+common path dropped **11.1 ms → 0.85 ms p50** (df point-reads
+no longer resolve long operand chains) — now **74×** vs the 63 ms
+all-common query on the same corpus. Watch delivery holds at 0.29 ms.
+
+Docs trued up: COMPARISON.md gained the sprint 9–27 parity section and a
+phase-by-phase rationale for the tail; README measured table refreshed.

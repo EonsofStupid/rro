@@ -1,0 +1,62 @@
+# vLLM embedding server — the third embedder engine, and the oracle that makes
+# the candle backend checkable.
+#
+# Serving the SAME weights the candle backend loads is the whole point: it turns
+# "our encoder looks right" into "two independent implementations agree
+# elementwise" (measured: cosine 0.9999 across docs and queries). Point this at a
+# different checkpoint and that cross-check silently stops meaning anything.
+#
+# ⚠️ DO NOT leave this running on a shared box. Start it for the cross-check,
+# then STOP it. Measured 2026-07-16: this unit held 11.6 GiB while the brain
+# (:8091) held 40.8 GiB and the vLLM reranker (:8092) held 12.9 GiB — ~80 GiB of
+# the GB10's 121.63 GiB. That pressure SIGKILL'd the llama.cpp embedder on :8090
+# mid-benchmark (`code=killed, status=9/KILL`) and destroyed a 6-minute run.
+# Check headroom first:
+#   nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv
+#
+# Install (rootless), deliberately and temporarily:
+#   cp deploy/rro-embed-vllm.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start rro-embed-vllm
+#   curl -s localhost:8096/v1/models
+#   # ... run the cross-check ...
+#   systemctl --user stop rro-embed-vllm    # <- do not skip this
+#
+# Verify the generator is happy before starting:
+#   /usr/libexec/podman/quadlet -dryrun -user
+
+[Unit]
+Description=RRO vLLM embedder — Qwen3-Embedding-0.6B, OpenAI /v1/embeddings on :8096
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=docker.io/vllm/vllm-openai:cu130-nightly
+ContainerName=rro-embed-vllm
+AddDevice=nvidia.com/gpu=all
+PodmanArgs=--ipc=host
+PublishPort=8096:8000
+Volume=%h/.cache/huggingface:/root/.cache/huggingface
+Volume=%h/Projects/clyffy/models/embedders/qwen3-embedding-0-6b:/model:ro
+# --runner pooling --convert embed: `--task embed` was REMOVED from vLLM's CLI
+# (this nightly errors "unrecognized arguments: --task embed"). Discover the
+# current flags with `vllm serve --help=ModelConfig` — note that --help itself
+# needs the GPU attached or it dies with "Failed to infer device type".
+#
+# gpu-memory-utilization 0.10 (~12 GiB): the GB10's 121.63 GiB is shared with the
+# brain (:8091, ~40 GiB), the reranker (:8092, ~13 GiB) and the llama.cpp
+# embedders. A high value here crash-loops the box — 0.85 once produced 16.6k
+# restarts on an OOM ValueError. 0.6B needs almost nothing; do not raise this
+# without checking `nvidia-smi --query-compute-apps` first.
+Exec=/model --served-model-name qwen3-embed --runner pooling --convert embed \
+  --gpu-memory-utilization 0.10 --max-model-len 8192 \
+  --host 0.0.0.0 --port 8000
+
+[Service]
+Restart=on-failure
+RestartSec=5
+# Cold start measured at ~55s on this box; the brain's is ~87s. Give it room.
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target

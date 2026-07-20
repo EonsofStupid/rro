@@ -1,0 +1,5 @@
+[toolchain]
+# Stable, no edition-2024 coupling — Reason Ready builds on any recent stable
+# toolchain so it drops into a consumer's build without friction.
+channel = "stable"
+components = ["rustfmt", "clippy"]

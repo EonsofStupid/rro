@@ -1,0 +1,26 @@
+# Reason Ready — systemd unit.
+#   install -m644 deploy/rrf.service /etc/systemd/system/rrf.service
+#   install -m640 deploy/config.env.example /etc/rro/config.env   # then edit
+#   systemctl enable --now rrf
+[Unit]
+Description=Reason Ready Objects (RRO) engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rro/config.env
+ExecStart=/usr/local/bin/rro
+Restart=on-failure
+RestartSec=2
+# The daemon handles SIGTERM cleanly: drains, commits the RRD baseline.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+DynamicUser=yes
+StateDirectory=rro
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rro
+
+[Install]
+WantedBy=multi-user.target

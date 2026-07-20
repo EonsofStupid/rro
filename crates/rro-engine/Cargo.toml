@@ -1,0 +1,44 @@
+[package]
+name = "rro-engine"
+description = "Reason Ready — the orchestrator. Wires the components into one flow and runs the embedded daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rro"
+path = "src/bin/rro.rs"
+
+[features]
+# Build the daemon with the real candle backends compiled in. Off by default so
+# the workspace builds weightless (no model weights, no inference deps). With it,
+# `RRO_EMBEDDER=candle-qwen` / `RRO_RERANKER=candle-cross-encoder` load real
+# weights; without it, selecting those kinds is a clear config error at startup,
+# never a silent fallback to the synthetic embedder. See docs/MODELS.md.
+candle = ["model-registry/candle"]
+
+[dependencies]
+rro-core = { workspace = true }
+model-registry = { workspace = true }
+embedder = { workspace = true }
+recall = { workspace = true }
+reranker = { workspace = true }
+classifier = { workspace = true }
+connectome = { workspace = true }
+connxism = { workspace = true }
+rrd = { workspace = true }
+rro-net = { workspace = true }
+rro-ql = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+rro-client = { path = "../rro-client" }

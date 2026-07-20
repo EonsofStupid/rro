@@ -1,0 +1,28 @@
+# Reason Ready — Podman Quadlet Pod for a local a2a mesh / cluster node group.
+#
+# A Pod groups containers sharing a network namespace — the shape a single
+# cluster *node host* takes when it runs more than the engine (e.g. engine +
+# a sidecar exporter, or, at P8, an engine + its raft peer helper). For the
+# multi-engine local mesh (scripts/mesh.sh equivalent), run N copies of
+# rro.container with distinct RRO_NODE / ports instead; this pod is the
+# single-host grouping unit the cluster work (P8) builds on.
+#
+# Install:
+#   install -m644 deploy/rro-mesh.pod ~/.config/containers/systemd/rro-mesh.pod
+#   systemctl --user daemon-reload && systemctl --user start rro-mesh-pod
+#
+# Then a container joins it with `Pod=rro-mesh.pod` in its [Container] section.
+
+[Unit]
+Description=Reason Ready mesh pod (a2a node group)
+After=network-online.target
+Wants=network-online.target
+
+[Pod]
+# The a2a listener and ops port are published at the pod level; member
+# containers share this namespace. P8 adds the raft/gossip port here.
+PublishPort=7878:7878
+PublishPort=9090:9090
+
+[Install]
+WantedBy=default.target

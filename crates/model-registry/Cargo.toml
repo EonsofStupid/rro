@@ -1,0 +1,29 @@
+[package]
+name = "model-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Selection is data, not code: turns embedder/reranker config into boxed trait objects."
+
+[features]
+default = []
+# Real-model backends. Off by default so the workspace builds weightless — no
+# model weights, no inference deps. Each arm's constructor lives behind its
+# feature; without it, selecting that kind is a clear config error, never a
+# silent fallback.
+candle = ["embedder/candle", "reranker/candle", "dep:candle-core"]
+onnx = []
+
+[dependencies]
+rro-core = { workspace = true }
+embedder = { workspace = true }
+reranker = { workspace = true }
+candle-core = { version = "0.11.0", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

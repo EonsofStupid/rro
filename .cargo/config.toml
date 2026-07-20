@@ -1,0 +1,17 @@
+# Build tuning. Scoped per-target, so an x86 CI runner is unaffected by the
+# aarch64 block and vice versa.
+
+[target.aarch64-unknown-linux-gnu]
+# The GB10's Grace CPU (Cortex-X925) has fp16/bf16/i8mm/dotprod in hardware,
+# but rustc's aarch64 baseline is `neon` only. Without this, candle's CPU matmul
+# path (gemm-common) fails to even assemble: its fp16 SIMD is inline asm that
+# needs `fullfp16`, giving "error: instruction requires: fullfp16".
+#
+# target-cpu=native fixes that and is also the honest setting for this engine:
+# RRO is built for the box it runs on, and this unlocks bf16 + i8mm + dotprod
+# for the CPU embedder path rather than leaving the silicon idle.
+#
+# Trade-off: binaries built here are not portable to older ARM cores. That is
+# fine for a dedicated node; a distributable build should pin an explicit
+# feature set (`-C target-feature=+fp16,+bf16,+i8mm`) instead.
+rustflags = ["-C", "target-cpu=native"]

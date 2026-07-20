@@ -1,0 +1,23 @@
+Reason Ready Objects (RRO) — Proprietary License
+Copyright (c) 2026 EonsofStupid. All rights reserved.
+
+This software and its source code (the "Software") are the confidential and
+proprietary property of the copyright holder. No license, express or implied,
+to use, copy, modify, merge, publish, distribute, sublicense, or sell copies
+of the Software is granted except by a separate written agreement signed by
+the copyright holder.
+
+The Software is authored independently and in its entirety by the Reason Ready
+project. It carries no third-party database, vector engine, or model lineage,
+and is not derived from, affiliated with, or endorsed by any third party.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+NOTE: This is a placeholder license reflecting a private, all-rights-reserved
+posture while the engine is under active development. Swap it for your final
+terms (dual-license, source-available, or commercial) before any public flip.

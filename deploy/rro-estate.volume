@@ -1,0 +1,7 @@
+# Reason Ready — Podman Quadlet named volume for the durable estate.
+# Referenced by rro.container as `rro-estate.volume`. Install alongside it:
+#   install -m644 deploy/rro-estate.volume ~/.config/containers/systemd/rro-estate.volume
+
+[Volume]
+# Local driver; the RocksDB estate + events stream live here across updates.
+Driver=local
