@@ -25,6 +25,10 @@ pub enum EngineMode {
     Deterministic,
     /// Real semantic engine backed by HTTP embedder/reranker servers.
     Http,
+    /// Real semantic engine over a vLLM quadlet, reached via **signal-emitted**
+    /// embed/rerank (a2a bus → [`ModelNode`](crate::signal_model::ModelNode)
+    /// fulfiller). The model runs in the quadlet, never in this process.
+    Signal,
 }
 
 /// A liveness snapshot of an [`EmbeddedEngine`] — cheap to obtain, safe to poll.
@@ -109,6 +113,40 @@ impl EmbeddedEngine {
             estate,
             flow,
             mode: EngineMode::Http,
+        })
+    }
+
+    /// Assemble the **signal-emitted** real engine over a vLLM quadlet: the
+    /// embedder and reranker EMIT `embed`/`rerank` signals onto an a2a bus, and a
+    /// [`ModelNode`](crate::signal_model::ModelNode) fulfils them by calling the
+    /// vLLM localhost endpoints. The model runs in the quadlet, never in this
+    /// process, and the flow never learns where it lives — same contract whether
+    /// the fulfiller is co-located or a remote GPU node.
+    ///
+    /// Async because the fulfiller connects and probes the vLLM servers (the
+    /// embedder reads its dimension), which is cross-checked against the estate's
+    /// fixed dimension. This is the path the fabric runs on — every embed/rerank
+    /// rides the signal spine.
+    pub async fn vllm_signals(
+        path: impl AsRef<Path>,
+        name: &str,
+        embed_url: &str,
+        rerank_url: &str,
+    ) -> Result<Self> {
+        let estate = Arc::new(connxism::Estate::open(path, name)?);
+        let models = crate::signal_model::connect_vllm_signals(embed_url, rerank_url).await?;
+        // Fail fast on a dimension mismatch before any index.
+        preflight_dim(&estate, models.embedder.dim())?;
+        let flow = ObjectBuilder::new()
+            .rrd(Arc::new(rrd::Rrd::new()))
+            .recall(Arc::new(estate.recall()))
+            .embedder(models.embedder)
+            .reranker(models.reranker)
+            .build();
+        Ok(Self {
+            estate,
+            flow,
+            mode: EngineMode::Signal,
         })
     }
 

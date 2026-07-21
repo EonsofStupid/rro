@@ -32,6 +32,7 @@ pub mod ops;
 mod replica;
 mod sample;
 mod serve;
+pub mod signal_model;
 mod sql;
 
 pub use auth::{AuthPolicy, Claims, Role};
@@ -46,6 +47,9 @@ pub use ingest::{
 };
 pub use replica::Replica;
 pub use sample::sample_corpus;
+pub use signal_model::{
+    connect_vllm_signals, ModelNode, SignalEmbedder, SignalModels, SignalReranker,
+};
 pub use serve::{serve, wait_for_shutdown, ServeOptions};
 
 // Re-export the shared surface so a consumer needs only `rro-engine`.
