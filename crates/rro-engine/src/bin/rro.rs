@@ -8,11 +8,48 @@
 //! - `RUST_LOG`   — tracing filter (default `info`).
 //! - `RRO_EMBEDDER` / `RRO_RERANKER` — model selection; see [`model_registry`].
 //!   Unset = the weightless deterministic/lexical defaults.
+//! - `RRO_SIGNALS` — `1` routes the vLLM backend through the **signal spine**
+//!   (embed/rerank EMIT signals fulfilled by an in-bus `ModelNode` calling the
+//!   vLLM quadlet) instead of a direct HTTP client. Endpoints from
+//!   `RRO_EMBEDDER_ENDPOINT` / `RRO_RERANKER_ENDPOINT`, or the vLLM defaults.
 
 use std::sync::Arc;
 
 use model_registry::{build_embedder, build_reranker, EmbedderConfig, RerankerConfig};
 use rro_engine::{estate_map, init_tracing, sample_corpus, serve, ReasonReadyObject, ServeOptions};
+
+/// Build the embedder + reranker. With `RRO_SIGNALS=1`, route the vLLM backend
+/// through the signal seam — the embedder/reranker EMIT `embed`/`rerank` signals
+/// fulfilled by an in-bus `ModelNode` calling the vLLM quadlet — instead of the
+/// model-registry's direct HTTP clients. The model never loads in this process.
+async fn select_models(
+    embed_cfg: &EmbedderConfig,
+    rerank_cfg: &RerankerConfig,
+) -> anyhow::Result<(Arc<dyn rro_core::Embedder>, Arc<dyn rro_core::Reranker>)> {
+    let signals = std::env::var("RRO_SIGNALS")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    if !signals {
+        return Ok((
+            build_embedder(embed_cfg).await?,
+            build_reranker(rerank_cfg).await?,
+        ));
+    }
+    let embed_ep = embed_cfg
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8092/v1/embeddings".to_string());
+    let rerank_ep = rerank_cfg
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8092/rerank".to_string());
+    let models = rro_engine::connect_vllm_signals(embed_ep, rerank_ep).await?;
+    tracing::info!("models on the signal spine (vLLM fulfiller)");
+    // Typed bindings so the concrete Arc<Signal*> unsizes to Arc<dyn _>.
+    let embedder: Arc<dyn rro_core::Embedder> = models.embedder;
+    let reranker: Arc<dyn rro_core::Reranker> = models.reranker;
+    Ok((embedder, reranker))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,8 +76,7 @@ async fn main() -> anyhow::Result<()> {
     // quietly serving synthetic vectors under a real model's name.
     let embed_cfg = EmbedderConfig::from_env()?;
     let rerank_cfg = RerankerConfig::from_env()?;
-    let embedder = build_embedder(&embed_cfg).await?;
-    let reranker = build_reranker(&rerank_cfg).await?;
+    let (embedder, reranker) = select_models(&embed_cfg, &rerank_cfg).await?;
     tracing::info!(
         embedder = embed_cfg.kind.as_str(),
         model = embedder.model_name(),
