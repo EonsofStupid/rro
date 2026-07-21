@@ -1,10 +1,16 @@
 # MODELS.md — the real embedder/reranker: architecture + exact build plan
 
-_The definitive spec for wiring **real** models (Qwen embedder, Nemotron-class
-reranker) into RRO. Written so a session on the target box executes it verbatim.
-This is the thing that was asked for first and is not yet done: every accuracy
-number in the repo today was produced by the deterministic (synthetic) embedder
-and is UNVERIFIED for real retrieval until this lands._
+> **✅ DONE 2026-07-20 — real retrieval is LIVE and PROVEN.** The real path is
+> **nemotron via vLLM, reached over the signal seam** (SignalEmbedder/SignalReranker
+> emit `embed`/`rerank`; a ModelNode fulfils against the vLLM quadlets — NOT the
+> candle in-process path this doc originally planned, and NOT Qwen). End-to-end
+> proof: `crates/rro-engine/examples/live_grounding.rs` (real 2048-d nemotron
+> embeddings + reranking, semantically-correct recall). The candle-first Qwen
+> sections below are SUPERSEDED and kept only as historical reference — see
+> `docs/FABRIC.md` + memory `end-to-end-nemotron-proven` for the real architecture.
+
+_(Historical) The original spec for wiring real models into RRO, deterministic-only
+at the time of writing._
 
 ## 0. Prerequisites on the target box (this container cannot meet them)
 
