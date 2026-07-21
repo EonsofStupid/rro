@@ -15,3 +15,8 @@
 # fine for a dedicated node; a distributable build should pin an explicit
 # feature set (`-C target-feature=+fp16,+bf16,+i8mm`) instead.
 rustflags = ["-C", "target-cpu=native"]
+
+# sccache — compilation cache. Wraps rustc so unchanged crates are served from
+# cache instead of recompiled (a large win on this workspace's ~1.5-min builds).
+[build]
+rustc-wrapper = "sccache"

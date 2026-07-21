@@ -1,0 +1,31 @@
+{
+  "workspace": "rro",
+  "kind": "rust-cargo-workspace",
+  "description": "Reason Ready Objects — the Fjall-native RAG + intelligence engine. Signal-emitted embed/rerank, hybrid recall, RRD classifier.",
+  "established": "2026-07-20",
+  "toolchain": {
+    "rustc": "1.97.1",
+    "target": "aarch64-unknown-linux-gnu (GB10/Grace, target-cpu=native)"
+  },
+  "layout": {
+    "crates/": "workspace members (rro-core, connxism [fjall], embedder, reranker, recall, rrd, classifier, connectome, connectors, rro-net, rro-ql, rro-client, rro-engine, model-registry)",
+    "docs/": "ARCHITECTURE, FABRIC, MODELS, PARITY, MAP",
+    "deny.toml": "supply-chain policy (cargo-deny)",
+    ".cargo/config.toml": "aarch64 target-cpu=native + sccache rustc-wrapper"
+  },
+  "capability_tools": {
+    "cargo-outdated": "0.19.0 — dep currency (all deps confirmed up to date)",
+    "cargo-audit": "0.22.2 — RustSec CVE scan (0 vulns; paste unmaintained, documented)",
+    "cargo-deny": "0.20.2 — license/advisory/ban/source policy (deny.toml; clean)",
+    "cargo-nextest": "0.9.140 — parallel test runner",
+    "cargo-machete": "0.9.2 — unused-dep finder (flagged serde/tracing — review for macro/derive false-positives)",
+    "sccache": "0.16.0 — compile cache (wired as rustc-wrapper; caches non-incremental deps/release/CI; PROVEN with a cache hit)",
+    "rust-analyzer": "1.97.1 — LSP; installed via `rustup component add rust-analyzer` (was a dead rustup proxy). ACTIVATES ON CLAUDE CODE RESTART (plugin exhausted retries this session on the pre-fix crashes)."
+  },
+  "deps_baseline": {
+    "fjall": "3.1.8",
+    "candle": "0.11.0",
+    "tokenizers": "0.23.1"
+  },
+  "install_all": "cargo binstall -y cargo-outdated cargo-audit cargo-deny cargo-nextest cargo-machete sccache && rustup component add rust-analyzer"
+}
